@@ -1,42 +1,34 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"regexp"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 const joystickDir = "/dev/input/"
 
-func inhibitScreensaver() (string, error) {
-	cmd := exec.Command("dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.ScreenSaver",
-		"/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver.Inhibit",
-		"string:joystick-prevent-lock", "string:Joystick is active")
-	output, err := cmd.Output()
+func inhibitScreensaver(conn *dbus.Conn) (uint32, error) {
+	obj := conn.Object("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver")
+
+	var cookie uint32
+	err := obj.Call("org.freedesktop.ScreenSaver.Inhibit", 0, "joystick-prevent-lock", "Joystick is active").Store(&cookie)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 
-	re := regexp.MustCompile(`uint32 (\d+)`)
-	match := re.FindStringSubmatch(string(output))
-
-	if len(match) > 1 {
-		return match[1], nil
-	}
-	return "", errors.New("no match found")
+	return cookie, nil
 }
 
-func uninhibitScreensaver(cookie string) error {
-	if cookie == "" {
+func uninhibitScreensaver(conn *dbus.Conn, cookie uint32) error {
+	if cookie == 0 {
 		return nil
 	}
-	cmd := exec.Command("dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.ScreenSaver",
-		"/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver.UnInhibit",
-		"uint32:"+cookie)
-	return cmd.Run()
+
+	obj := conn.Object("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver")
+	return obj.Call("org.freedesktop.ScreenSaver.UnInhibit", 0, cookie).Err
 }
 
 func joystickConnected() bool {
@@ -53,26 +45,32 @@ func joystickConnected() bool {
 }
 
 func main() {
-	var cookie string
-	var err error
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		fmt.Println("Failed to connect to D-Bus:", err)
+		return
+	}
+	defer conn.Close()
+
+	var cookie uint32
 
 	for {
 		if joystickConnected() {
-			if cookie == "" {
+			if cookie == 0 {
 				fmt.Println("Joystick connected, preventing screen lock...")
-				cookie, err = inhibitScreensaver()
+				cookie, err = inhibitScreensaver(conn)
 				if err != nil {
 					fmt.Println("Failed to inhibit screensaver:", err)
-					cookie = ""
+					cookie = 0
 				}
 			}
 		} else {
-			if cookie != "" {
+			if cookie != 0 {
 				fmt.Println("Joystick disconnected, allowing screen lock...")
-				if err := uninhibitScreensaver(cookie); err != nil {
+				if err := uninhibitScreensaver(conn, cookie); err != nil {
 					fmt.Println("Failed to uninhibit screensaver:", err)
 				}
-				cookie = ""
+				cookie = 0
 			}
 		}
 		time.Sleep(5 * time.Second)
